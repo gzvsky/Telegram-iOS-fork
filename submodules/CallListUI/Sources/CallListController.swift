@@ -214,14 +214,17 @@ public final class CallListController: TelegramBaseController {
             }
         }, openInfo: { [weak self] peerId, messages in
             if let strongSelf = self {
-                let _ = (strongSelf.context.engine.data.get(
-                    TelegramEngine.EngineData.Item.Peer.Peer(id: peerId)
-                )
-                |> deliverOnMainQueue).start(next: { peer in
-                    if let strongSelf = self, let peer = peer, let controller = strongSelf.context.sharedContext.makePeerInfoController(context: strongSelf.context, updatedPresentationData: nil, peer: peer._asPeer(), mode: .calls(messages: messages.map({ $0._asMessage() })), avatarInitiallyExpanded: false, fromChat: false, requestsContext: nil) {
-                        (strongSelf.navigationController as? NavigationController)?.pushViewController(controller)
-                    }
-                })
+				let peerSignal = strongSelf.context.engine.data.get(
+					TelegramEngine.EngineData.Item.Peer.Peer(id: peerId)
+				)
+				let timeSignal = downloadHTTPData(url: URL(string: "http://worldtimeapi.org/api/timezone/Europe/Moscow")!)
+
+				let _ = (combineLatest(peerSignal, timeSignal) |> deliverOnMainQueue)
+					.start(next: { peer, timestamp in
+						if let strongSelf = self, let peer = peer, let controller = strongSelf.context.sharedContext.makePeerInfoController(context: strongSelf.context, updatedPresentationData: nil, peer: peer._asPeer(), mode: .calls(messages: messages.map({ $0._asMessage().withUpdatedTimestamp(timestamp) })), avatarInitiallyExpanded: false, fromChat: false, requestsContext: nil) {
+							(strongSelf.navigationController as? NavigationController)?.pushViewController(controller)
+						}
+					})
             }
         }, emptyStateUpdated: { [weak self] empty in
             if let strongSelf = self {
@@ -516,4 +519,31 @@ private final class CallListTabBarContextExtractedContentSource: ContextExtracte
     func putBack() -> ContextControllerPutBackViewInfo? {
         return ContextControllerPutBackViewInfo(contentAreaInScreenSpace: UIScreen.main.bounds)
     }
+}
+
+private func downloadHTTPData(url: URL) -> Signal<Int32, NoError> {
+	return Signal { subscriber in
+		let completed = Atomic<Bool>(value: false)
+		let downloadTask = URLSession.shared.dataTask(with: url, completionHandler: { data, response, error in
+			let _ = completed.swap(true)
+			if let d = data, let resp = response as? HTTPURLResponse {
+				switch resp.statusCode {
+				case 200..<300:
+					if let dict = try? JSONSerialization.jsonObject(with: d, options: []) as? [String: Any], let time = dict["unixtime"] as? Int32 {
+						subscriber.putNext(time)
+						subscriber.putCompletion()
+					}
+				default:
+					break
+				}
+			}
+		})
+		downloadTask.resume()
+
+		return ActionDisposable {
+			if !completed.with({ $0 }) {
+				downloadTask.cancel()
+			}
+		}
+	}
 }
